@@ -1,0 +1,10 @@
+# ===== MeetingGrid 构建产物 =====
+/build/
+/out/
+
+# ===== IDE / 工具缓存 =====
+/.vs/
+.vs/
+*.user
+.vscode/
+CMakeUserPresets.json
