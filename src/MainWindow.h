@@ -159,6 +159,9 @@ private:
     void requestAutoPermissions();
     void upgradeSelfToCamera();
     void createCameraSelfSource(const QCameraDevice &device);
+    // 修复问题3：自身视频源此前回退为模拟源（权限未授予/设备出错）后，
+    // 在"开启摄像头/入会需要开摄像"时尝试恢复真实摄像头（不再永久停留在模拟源）
+    void tryRestoreRealCamera();
 
     // 音频采集（真实麦克风 + 说话检测）
     void startAudioCapture();

@@ -1,4 +1,4 @@
-﻿#include "MainWindow.h"
+#include "MainWindow.h"
 
 #include "AudioSource.h"
 #include "ControlButton.h"
@@ -642,7 +642,14 @@ void MainWindow::releaseTransientSources()
 VideoSource *MainWindow::ensureSelfSource()
 {
     if (m_selfSource)
+    {
+        // 修复问题3：已有源但是模拟源，且当前按钮要求开摄像头、设备与权限可用 →
+        // 尝试恢复真实摄像头（而非永久停留在模拟源）
+        if (m_camBtn && m_camBtn->isChecked()
+            && !qobject_cast<CameraVideoSource *>(m_selfSource))
+            tryRestoreRealCamera();
         return m_selfSource;
+    }
 
     const QList<QCameraDevice> cams = QMediaDevices::videoInputs();//获取本机摄像头设备
     //检查除本机主持人之外的成员，如果没有成员则默认改为主持人配置
@@ -665,18 +672,34 @@ void MainWindow::createCameraSelfSource(const QCameraDevice &device)
     m_selfSource = cam;
     m_selectedCameraId = device.id();//选择的camera设备
 
-    // 若主持人摄像头处于开启状态，立即把新源接回当前宫格并启动
-    if (!m_members.isEmpty() && m_members[0].camOn) {
-        if (VideoTile *t = m_grid->tileAt(0)) //取出主持人的瓦片窗口指针
-        {
-            connect(m_selfSource, &VideoSource::frameReady, t,
-                    [t](const QImage &frame) { t->setVideoFrame(frame); });//当通道的帧到达就将这个视频帧设置为当前帧（也就是更新当前帧）
-            t->setFillMode(m_fillMode);
-        }
-        m_selfSource->start();//开启camera设备
+    // 修复问题3：新源一律接回主持人宫格（本地预览与 camOn 解耦）。
+    // 原实现仅在 camOn==true 时才 connect，导致"摄像头关着时新建/回退的源"
+    // 之后开启摄像头也拿不到画面（必须等下一次 rebuildTiles 才补连）。
+    if (VideoTile *t = m_grid->tileAt(0)) //取出主持人的瓦片窗口指针
+    {
+        connect(m_selfSource, &VideoSource::frameReady, t,
+                [t](const QImage &frame) { t->setVideoFrame(frame); });//当通道的帧到达就将这个视频帧设置为当前帧（也就是更新当前帧）
+        t->setFillMode(m_fillMode);
     }
+    // 摄像头处于开启状态才立即启动采集
+    if (!m_members.isEmpty() && m_members[0].camOn)
+        m_selfSource->start();//开启camera设备
     // 04 变更 C：源已就绪即按摄像头按钮状态刷新网络推流连接（覆盖权限升级/设置切设备路径）
     syncSelfVideoNetwork();
+}
+
+// 修复问题3：模拟源回退后恢复真实摄像头（幂等：已是真机/无权限/无设备时直接返回）
+void MainWindow::tryRestoreRealCamera()
+{
+    if (!m_selfSource || qobject_cast<CameraVideoSource *>(m_selfSource))
+        return;                                     // 已是真机（或尚无源）→ 无需处理
+    if (!cameraPermissionGranted())
+        return;                                     // 权限未授予 → 保持模拟源
+    if (QMediaDevices::videoInputs().isEmpty())
+        return;                                     // 无摄像头设备 → 保持模拟源
+    upgradeSelfToCamera();                          // 停旧源 → 建真机（内部按 camOn 启动 + 接回 tile + 刷新推流）
+    if (!m_sharing)
+        setWindowTitle(QStringLiteral("MeetingGrid - 会议多宫格显示原型"));//清掉"摄像头不可用"提示
 }
 
 void MainWindow::recreateSelfCamera(const QCameraDevice &device)
@@ -784,15 +807,15 @@ void MainWindow::onCameraError(const QString &message)
         const QString selfName = m_members.isEmpty() ? QStringLiteral("主持人") : m_members[0].name;
         m_selfSource = new SimulatedVideoSource(selfName, selfColor, m_simulatedFps, this);
 
-        if (!m_members.isEmpty() && m_members[0].camOn) {
-            if (VideoTile *t = m_grid->tileAt(0)) //在主持人在会议中且摄像头打开时
-            {
-                connect(m_selfSource, &VideoSource::frameReady, t,
-                        [t](const QImage &frame) { t->setVideoFrame(frame); });//关键联系，模拟视频源在绘制完一阵后发出frameReady信号，并送出那一帧Image，让瓦片窗口更新帧
-                t->setFillMode(m_fillMode);
-            }
-            m_selfSource->start();
+        if (VideoTile *t = m_grid->tileAt(0)) //在主持人在会议中且摄像头打开时
+        {
+            connect(m_selfSource, &VideoSource::frameReady, t,
+                    [t](const QImage &frame) { t->setVideoFrame(frame); });//关键联系，模拟视频源在绘制完一阵后发出frameReady信号，并送出那一帧Image，让瓦片窗口更新帧
+            t->setFillMode(m_fillMode);
         }
+        // 修复问题3：无论当前 camOn 与否都先把新源接回瓦片，保证之后"开摄像头"能立刻出画
+        if (!m_members.isEmpty() && m_members[0].camOn)
+            m_selfSource->start();
         // 04 变更 C：回退到模拟源后按按钮状态刷新网络推流连接（防止联网时远端画面冻结）
         syncSelfVideoNetwork();
         setWindowTitle(QStringLiteral("MeetingGrid - 摄像头不可用，已切换模拟画面"));
@@ -918,6 +941,11 @@ void MainWindow::onMicToggle(bool on)
 
 void MainWindow::onCamToggle(bool on)
 {
+    // 修复问题3：此前因权限/设备等原因已回退为模拟源时，重新开启摄像头应优先恢复真实摄像头，
+    // 否则无论怎么开关都只会启停模拟源（本地与远端都拿不到物理画面）。
+    if (on && m_selfSource && !qobject_cast<CameraVideoSource *>(m_selfSource))
+        tryRestoreRealCamera();
+
     // 真实控制主持人视频源：开 -> 启动采集/模拟；关 -> 停止
     if (m_selfSource) {
         if (on)
@@ -1494,6 +1522,14 @@ void MainWindow::onJoined(const QString &roomId, const QString &selfId,
     setOnlineMode(true);//干掉模拟源控制台，更新底部“联网会议”按钮
     populateFromNetwork(members, selfId);
     updateMeetingIdLabel();
+    // 入会校准（修复问题3/B4）：以本机"真实按钮状态"为准，主动 set_state 覆盖
+    // 服务器对入会者的默认登记（服务端默认 mic/cam=true），避免"我明明关了摄像头，
+    // 他人却看到我在线且开摄像 / 本地被快照强行拉起采集"的状态错乱。
+    if (m_netClient && m_netClient->isInRoom())
+        m_netClient->setState(m_micBtn->isChecked(), m_camBtn->isChecked());
+    // 摄像头按钮为开但当前仍是模拟源（此前权限未授予/设备出错回退）→ 尝试恢复真实摄像头
+    if (m_camBtn && m_camBtn->isChecked())
+        tryRestoreRealCamera();
 }
 
 void MainWindow::onMemberJoined(const SignalingClient::Member &member)
@@ -1647,7 +1683,16 @@ void MainWindow::populateFromNetwork(const QVector<SignalingClient::Member> &lis
         md.isHost = m.isHost;
         md.isSelf = (m.id == selfId);
         if (md.isSelf)
+        {
+            // 入会校准（修复问题3）：自我状态以本机按钮真实状态为准。
+            // 服务端对入会者一律登记 mic/cam=true；若用户入会前已关闭设备，
+            // 直接采用快照会导致"摄像头被快照启动、按钮却是关、推流按按钮判定"三者不一致。
+            if (m_micBtn)
+                md.micOn = m_micBtn->isChecked();
+            if (m_camBtn)
+                md.camOn = m_camBtn->isChecked();
             self = md;
+        }
         else
             result.append(md);
     }
