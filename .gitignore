@@ -1,6 +1,12 @@
 # ===== MeetingGrid 构建产物 =====
 /build/
 /out/
+# 根目录误放的构建产物（exe/pdb/临时日志）
+/MeetingGrid.exe
+/MeetingGridServer.exe
+/*.exe
+/*.pdb
+/*.log
 
 # ===== IDE / 工具缓存 =====
 /.vs/

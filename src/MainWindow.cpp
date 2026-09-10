@@ -1,4 +1,4 @@
-#include "MainWindow.h"
+﻿#include "MainWindow.h"
 
 #include "AudioSource.h"
 #include "ControlButton.h"
@@ -960,8 +960,8 @@ void MainWindow::onShareToggle(bool on)
     else
     {
         // 04 变更 B：共享关闭先恢复摄像头按钮可用。
-        // 顺序关键：必须"先 enable 再 setChecked(true)"——禁用态下 setChecked 不会发射 toggled，
-        // 否则自动恢复摄像头的 onCamToggle(true) 不会触发，摄像头将无法恢复。
+        // 顺序说明（Qt：QAbstractButton::setChecked 不区分禁用态，状态变化即会发射 toggled，
+        // 本处"先 enable 再 setChecked"仅为了界面状态一致与稳妥，并非信号触发的硬性前提）。
         if (m_camBtn) {
             m_camBtn->setEnabled(true);
             m_camBtn->setToolTip(QString());
@@ -1573,23 +1573,6 @@ void MainWindow::setOnlineMode(bool online)
     const bool changed = (m_online != online);
     m_online = online;
 
-    // 04 变更 A/B/D：共享按钮可用性随会话形态切换。
-    // blockSignals 防止"复位勾选"触发 toggled→onShareToggle，避免协议/摄像头连锁副作用。
-    if (m_shareBtn) {
-        const bool wasBlocked = m_shareBtn->signalsBlocked();
-        m_shareBtn->blockSignals(true);
-        m_shareBtn->setEnabled(online);          // 仅联网（已入房）可用
-        if (!online)
-            m_shareBtn->setChecked(false);       // 离会：共享复位为未勾选（共享必关）
-        m_shareBtn->blockSignals(wasBlocked);
-    }
-    // 04 变更 B/D：进入联网或离会时摄像头按钮一律恢复可用（共享期的禁用由 onShareToggle 单独管理）。
-    // setEnabled 不发射 toggled，无副作用；tooltip 一并清掉"共享中不可用"提示。
-    if (m_camBtn) {
-        m_camBtn->setEnabled(true);
-        m_camBtn->setToolTip(QString());
-    }
-
     if (m_demoSection)
         m_demoSection->setVisible(!online);
     if (m_demoNote)
@@ -1597,18 +1580,51 @@ void MainWindow::setOnlineMode(bool online)
     if (m_networkBtn)
         m_networkBtn->setLabelText(online ? QStringLiteral("离开会议")
                                           : QStringLiteral("联网会议"));
+
     if (!online)
     {
-        stopScreenSharing();      // 保留原逻辑：停共享屏幕推流
-        teardownRemoteAudio();    // 保留原逻辑：停远端音频播放（音频数据来自网络）
-        // 04 变更 D：复位共享业务态（m_sharingScreen 已由 stopScreenSharing 复位）
+        // 离会语义（04 v1.1，用户确认）：共享中离会视同"正常关闭共享"。
+        // 通过 toggled→onShareToggle(false) 走完整关闭流程：
+        //   停共享推流(stopScreenSharing)、清共享状态/标题、恢复摄像头按钮可用，
+        //   且若摄像头系"开启共享时被自动关闭"(m_shareAutoPausedCam)则自动恢复开启。
+        // 注意：此处不能 blockSignals —— 需要 onShareToggle 生效才能完成上述恢复。
+        if (m_shareBtn && m_shareBtn->isChecked())
+            m_shareBtn->setChecked(false);   // 触发 onShareToggle(false)
+
+        // 以下为兜底（幂等）：保留原逻辑"自动停止共享/远端音频"，并防异常路径残留
+        stopScreenSharing();      // 停共享屏幕推流
+        teardownRemoteAudio();    // 停远端音频播放（音频数据来自网络）
         m_sharing = false;
         m_shareAutoPausedCam = false;
-        updateShareUi();          // 清除"正在共享屏幕"标题/样式残留
+        updateShareUi();          // 清"正在共享屏幕"标题/样式残留
+
+        // 回到本地演示：共享按钮置灰不可用（此刻已未勾选，不会再产生 toggled 副作用）
+        if (m_shareBtn) {
+            m_shareBtn->setEnabled(false);
+            m_shareBtn->setToolTip(QStringLiteral("仅联网会议可用"));
+        }
+        // 摄像头按钮可用性：共享路径已由 onShareToggle(false) 恢复；此处兜底
+        if (m_camBtn) {
+            m_camBtn->setEnabled(true);
+            m_camBtn->setToolTip(QString());
+        }
+
         if (changed)
         {
             m_netColorOf.clear();
-            resetLocalDemoMembers();//重建本地模拟源瓦片窗口（内部保留设备状态，见 resetLocalDemoMembers）
+            resetLocalDemoMembers();//重建本地模拟源瓦片窗口（内部以按钮态播种，见 resetLocalDemoMembers）
+        }
+    }
+    else
+    {
+        // 进入联网会议（已入房）：共享按钮恢复可用（tooltip 同步为正常描述）
+        if (m_shareBtn) {
+            m_shareBtn->setEnabled(true);
+            m_shareBtn->setToolTip(QString());
+        }
+        if (m_camBtn) {
+            m_camBtn->setEnabled(true);
+            m_camBtn->setToolTip(QString());
         }
     }
 }
